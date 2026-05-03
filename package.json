@@ -1,0 +1,21 @@
+{
+  "name": "coach",
+  "version": "1.0.0",
+  "description": "Personal AI training & nutrition coach — WHOOP + Strava + Claude",
+  "main": "coach.js",
+  "scripts": {
+    "start": "node coach.js",
+    "dev": "node --watch coach.js"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.30.0",
+    "better-sqlite3": "^11.3.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "node-cron": "^3.0.3",
+    "node-fetch": "^3.3.2"
+  }
+}
