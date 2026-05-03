@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Privacy Policy — Coach</title>
+<style>
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    max-width: 720px;
+    margin: 40px auto;
+    padding: 0 24px;
+    color: #1a1a1a;
+    line-height: 1.6;
+  }
+  h1 { font-size: 1.8em; margin-bottom: 4px; }
+  h2 { font-size: 1.2em; margin-top: 32px; color: #333; }
+  .updated { color: #888; font-size: 0.9em; margin-bottom: 32px; }
+  a { color: #2563eb; }
+</style>
+</head>
+<body>
+
+<h1>Privacy Policy — Coach</h1>
+<p class="updated">Last updated: May 3, 2026</p>
+
+<p>Coach is a personal-use application that connects to WHOOP and Strava to provide the user with daily training and nutrition recommendations based on their own health and activity data. This policy describes what data Coach handles and how.</p>
+
+<h2>Who operates Coach</h2>
+<p>Coach is operated by Casey Roberts as a personal project. Contact: <a href="mailto:ccroberts10@gmail.com">ccroberts10@gmail.com</a>.</p>
+
+<h2>What data Coach accesses</h2>
+<p>With the user's explicit authorization via OAuth, Coach accesses the following data from connected services:</p>
+<ul>
+  <li><strong>WHOOP:</strong> recovery score, heart rate variability (HRV), resting heart rate, sleep stages and duration, daily strain, and workout records.</li>
+  <li><strong>Strava:</strong> activity records including type, duration, distance, heart rate, power, elevation, and route data for activities the user has recorded.</li>
+</ul>
+
+<h2>How data is used</h2>
+<p>Data is used solely to generate personalized training and nutrition recommendations for the authenticated user. Recommendations are produced by sending an anonymized summary of the user's recent metrics to the Anthropic API (Claude), which returns a structured workout and nutrition prescription. No data is used for advertising, sold, or shared with third parties beyond what is required to deliver the service.</p>
+
+<h2>How data is stored</h2>
+<p>User data is stored in a private SQLite database on the user's own infrastructure (Railway). OAuth access and refresh tokens are stored encrypted at rest. The database is not accessible to anyone other than the account owner.</p>
+
+<h2>Third-party services</h2>
+<p>Coach transmits health metrics to the following services in order to function:</p>
+<ul>
+  <li><strong>Anthropic</strong> — for generating recommendations. See <a href="https://www.anthropic.com/legal/privacy">Anthropic's privacy policy</a>.</li>
+  <li><strong>Pushover</strong> — for delivering daily notifications to the user's own devices. See <a href="https://pushover.net/privacy">Pushover's privacy policy</a>.</li>
+</ul>
+
+<h2>Data retention and deletion</h2>
+<p>Because Coach is a personal-use application operated by and for a single user, the user controls all retention. Data may be deleted at any time by the user by removing it from their own database or by revoking access from the WHOOP and Strava account settings.</p>
+
+<h2>Your rights</h2>
+<p>You may revoke Coach's access to your WHOOP data at any time at <a href="https://app.prod.whoop.com/data-and-privacy">your WHOOP privacy settings</a> and to your Strava data at <a href="https://www.strava.com/settings/apps">your Strava settings</a>.</p>
+
+<h2>Changes to this policy</h2>
+<p>This policy may be updated as the application evolves. The "Last updated" date above reflects the most recent change.</p>
+
+<h2>Contact</h2>
+<p>Questions about this policy or about Coach: <a href="mailto:ccroberts10@gmail.com">ccroberts10@gmail.com</a></p>
+
+</body>
+</html>
