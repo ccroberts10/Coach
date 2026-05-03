@@ -753,6 +753,11 @@ ${prescriptions.slice(0, 7).map(p => {
 </body></html>`);
 });
 
+// Privacy policy (required by WHOOP for app approval)
+app.get('/privacy', (req, res) => {
+  res.sendFile(path.join(__dirname, 'privacy.html'));
+});
+
 app.get('/', (req, res) => res.redirect('/dashboard'));
 
 // =================== CRON ===================
