@@ -183,14 +183,16 @@ async function whoopGet(endpoint, params = {}) {
 }
 
 async function pullWhoopData() {
+  // WHOOP v2 API
+  // Recovery is nested inside cycle objects, not a separate endpoint
   const start = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
   const end = new Date().toISOString();
 
-  const [recovery, sleep, cycles, workouts] = await Promise.all([
-    whoopGet('/developer/v1/recovery', { start, end, limit: 25 }),
-    whoopGet('/developer/v1/activity/sleep', { start, end, limit: 25 }),
-    whoopGet('/developer/v1/cycle', { start, end, limit: 25 }),
-    whoopGet('/developer/v1/activity/workout', { start, end, limit: 25 }),
+  const [sleep, cycles, workouts, recovery] = await Promise.all([
+    whoopGet('/developer/v2/activity/sleep', { start, end, limit: 25 }),
+    whoopGet('/developer/v2/cycle', { start, end, limit: 25 }),
+    whoopGet('/developer/v2/activity/workout', { start, end, limit: 25 }),
+    whoopGet('/developer/v2/recovery', { start, end, limit: 25 }).catch(() => ({ records: [] })),
   ]);
 
   return { recovery, sleep, cycles, workouts };
