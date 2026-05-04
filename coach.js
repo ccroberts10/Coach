@@ -132,7 +132,7 @@ async function refreshWhoopToken() {
       refresh_token: t.refresh_token,
       client_id: WHOOP_CLIENT_ID,
       client_secret: WHOOP_CLIENT_SECRET,
-      scope: 'offline read:recovery read:sleep read:cycles read:workout read:profile',
+      scope: 'read:recovery read:sleep read:cycles read:workout read:profile read:body_measurement',
     }),
   })).json();
   if (!res.access_token) throw new Error(`WHOOP refresh failed: ${JSON.stringify(res)}`);
@@ -634,7 +634,7 @@ app.use(express.json());
 
 // OAuth flows
 app.get('/auth/whoop', (req, res) => {
-  const url = `https://api.prod.whoop.com/oauth/oauth2/auth?client_id=${WHOOP_CLIENT_ID}&redirect_uri=${encodeURIComponent(REDIRECT_URI + '/auth/whoop/callback')}&response_type=code&scope=offline%20read:recovery%20read:sleep%20read:cycles%20read:workout%20read:profile&state=coach`;
+  const url = `https://api.prod.whoop.com/oauth/oauth2/auth?client_id=${WHOOP_CLIENT_ID}&redirect_uri=${encodeURIComponent(REDIRECT_URI + '/auth/whoop/callback')}&response_type=code&scope=read:recovery%20read:sleep%20read:cycles%20read:workout%20read:profile%20read:body_measurement&state=coach`;
   res.redirect(url);
 });
 
