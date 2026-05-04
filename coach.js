@@ -736,53 +736,478 @@ app.get('/recent', (req, res) => {
   res.json(rows.map(r => ({ ...r, full_response: JSON.parse(r.full_response || '{}') })));
 });
 
-// Dashboard
+// JSON API for dashboard
+app.get('/api/data', (req, res) => {
+  const snapshots = db.prepare(`SELECT * FROM daily_snapshots ORDER BY date DESC LIMIT 14`).all();
+  const prescriptions = db.prepare(`SELECT * FROM prescriptions ORDER BY date DESC LIMIT 14`).all();
+  const activities = db.prepare(`SELECT * FROM activities ORDER BY date DESC LIMIT 14`).all();
+  res.json({
+    snapshots,
+    prescriptions: prescriptions.map(p => ({ ...p, full_response: JSON.parse(p.full_response || '{}') })),
+    activities: activities.map(a => ({ ...a, raw_strava: undefined })),
+    benchmarks: BENCHMARKS,
+  });
+});
+
+// Trigger run from dashboard (browser-friendly, POST returns JSON)
+app.post('/api/run', async (req, res) => {
+  try {
+    const result = await runDailyPipeline();
+    res.json({ success: true, prescription: result.prescription });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// Dashboard UI
 app.get('/dashboard', (req, res) => {
-  const snapshots = db.prepare(`SELECT * FROM daily_snapshots ORDER BY date DESC LIMIT 30`).all();
-  const prescriptions = db.prepare(`SELECT * FROM prescriptions ORDER BY date DESC LIMIT 30`).all();
-  const today = prescriptions[0];
-  const todayPrescription = today ? JSON.parse(today.full_response || '{}') : null;
   res.send(`<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>Coach Dashboard</title>
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Coach</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0a0a0a">
 <style>
-body{font-family:-apple-system,system-ui,sans-serif;background:#0a0a0a;color:#e8e8e8;margin:0;padding:16px;max-width:900px;margin:0 auto}
-h1{color:#4ade80;font-size:1.4em;margin:8px 0 16px}
-h2{color:#60a5fa;font-size:1.1em;margin:24px 0 8px;border-bottom:1px solid #333;padding-bottom:4px}
-.card{background:#1a1a1a;border-radius:12px;padding:16px;margin:8px 0}
-.recovery{font-size:2em;font-weight:bold}
-.green{color:#4ade80}.yellow{color:#facc15}.red{color:#f87171}
-.label{color:#888;font-size:0.85em}.val{font-size:1.1em;margin-bottom:8px}
-table{width:100%;border-collapse:collapse;font-size:0.85em}
-td,th{padding:6px;text-align:left;border-bottom:1px solid #222}
-pre{white-space:pre-wrap;word-break:break-word;font-size:0.85em;background:#0f0f0f;padding:12px;border-radius:8px}
-</style></head><body>
-<h1>🚴 Coach Dashboard</h1>
-${today ? `
-<div class="card">
-  <div class="label">${today.date} — ${todayPrescription?.headline || ''}</div>
-  <pre>${JSON.stringify(todayPrescription, null, 2)}</pre>
-</div>` : '<div class="card">No prescriptions yet. Hit POST /run.</div>'}
-<h2>Recent Snapshots</h2>
-<table><tr><th>Date</th><th>Recovery</th><th>HRV</th><th>RHR</th><th>Sleep hr</th><th>Deep min</th><th>Yest Strain</th><th>AC</th></tr>
-${snapshots.map(s => `<tr>
-<td>${s.date}</td>
-<td class="${s.recovery_pct >= 67 ? 'green' : s.recovery_pct >= 34 ? 'yellow' : 'red'}">${s.recovery_pct || '-'}</td>
-<td>${s.hrv?.toFixed?.(0) || '-'}</td><td>${s.rhr || '-'}</td>
-<td>${s.sleep_hours?.toFixed?.(1) || '-'}</td><td>${s.deep_sleep_min || '-'}</td>
-<td>${s.yesterday_strain?.toFixed?.(1) || '-'}</td><td>${s.acute_chronic_ratio || '-'}</td>
-</tr>`).join('')}
-</table>
-<h2>Recent Prescriptions</h2>
-${prescriptions.slice(0, 7).map(p => {
-  const fr = JSON.parse(p.full_response || '{}');
-  return `<div class="card">
-    <div class="label">${p.date}</div>
-    <div class="val"><b>${fr.headline || p.workout_type}</b></div>
-    <div>${fr.workout?.specific_workout || ''}</div>
-  </div>`;
-}).join('')}
-</body></html>`);
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;padding:0;background:#000;color:#e8e8e8;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI",sans-serif;font-size:15px;line-height:1.5}
+  .container{max-width:600px;margin:0 auto;padding:20px 16px 80px}
+  .header{display:flex;justify-content:space-between;align-items:center;margin-bottom:24px}
+  .header h1{margin:0;font-size:1.3rem;font-weight:700;letter-spacing:-0.02em}
+  .header .date{color:#888;font-size:0.85rem}
+  .refresh-btn{background:#1a1a1a;border:1px solid #2a2a2a;color:#e8e8e8;padding:8px 14px;border-radius:20px;font-size:0.85rem;cursor:pointer;font-family:inherit}
+  .refresh-btn:active{background:#2a2a2a}
+  .refresh-btn:disabled{opacity:0.5;cursor:wait}
+
+  .recovery-hero{background:linear-gradient(135deg,#0d1f12 0%,#0a0a0a 100%);border:1px solid #1f3a25;border-radius:20px;padding:24px;margin-bottom:16px;text-align:center}
+  .recovery-hero.yellow{background:linear-gradient(135deg,#1f1d0d 0%,#0a0a0a 100%);border-color:#3a3a1f}
+  .recovery-hero.red{background:linear-gradient(135deg,#1f0d0d 0%,#0a0a0a 100%);border-color:#3a1f1f}
+  .recovery-label{color:#888;text-transform:uppercase;letter-spacing:0.1em;font-size:0.7rem;margin-bottom:8px}
+  .recovery-pct{font-size:4rem;font-weight:800;letter-spacing:-0.04em;line-height:1;margin:0}
+  .green{color:#4ade80}.yellow{color:#facc15}.red{color:#f87171}.blue{color:#60a5fa}.purple{color:#a78bfa}
+  .recovery-headline{margin-top:12px;font-size:0.95rem;color:#ccc;font-weight:500}
+
+  .stat-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:16px}
+  .stat-tile{background:#0f0f0f;border:1px solid #1f1f1f;border-radius:14px;padding:14px 12px;text-align:center}
+  .stat-label{color:#666;font-size:0.7rem;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:6px}
+  .stat-value{font-size:1.4rem;font-weight:700;letter-spacing:-0.02em}
+  .stat-sub{font-size:0.7rem;color:#666;margin-top:2px}
+  .stat-arrow{font-size:0.7rem;margin-left:4px}
+  .arrow-up{color:#4ade80}.arrow-down{color:#f87171}.arrow-flat{color:#888}
+
+  .section{margin-top:28px}
+  .section-title{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:12px;padding:0 4px}
+  .section-title h2{margin:0;font-size:0.75rem;text-transform:uppercase;letter-spacing:0.1em;color:#666;font-weight:600}
+  .section-title .meta{font-size:0.75rem;color:#666}
+
+  .card{background:#0f0f0f;border:1px solid #1f1f1f;border-radius:16px;padding:18px;margin-bottom:12px}
+  .card-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
+  .card-icon{font-size:1.5rem}
+  .card-title{font-weight:700;font-size:1.05rem;letter-spacing:-0.01em}
+  .workout-meta{display:flex;gap:14px;font-size:0.8rem;color:#888;margin-bottom:14px;flex-wrap:wrap}
+  .workout-meta span{display:flex;align-items:center;gap:4px}
+  .workout-detail{font-size:0.92rem;color:#ddd;line-height:1.6;white-space:pre-wrap}
+  .workout-route{margin-top:14px;padding-top:14px;border-top:1px solid #1f1f1f;font-size:0.85rem;color:#aaa}
+  .workout-skip{margin-top:10px;font-size:0.8rem;color:#888;font-style:italic}
+
+  .nutrition-row{display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid #1a1a1a;font-size:0.88rem}
+  .nutrition-row:last-child{border-bottom:none}
+  .nutrition-label{color:#888;flex:0 0 110px;font-weight:500}
+  .nutrition-value{flex:1;color:#ddd}
+
+  .flag{display:inline-block;background:#3a1f1f;color:#f87171;padding:3px 9px;border-radius:6px;font-size:0.7rem;margin:2px 4px 2px 0;font-weight:500}
+
+  .chart{margin:16px 0}
+  .chart-row{display:flex;align-items:end;gap:6px;height:80px;padding:0 4px}
+  .chart-col{flex:1;display:flex;flex-direction:column;align-items:center;gap:4px}
+  .chart-bar{width:100%;background:#1a1a1a;border-radius:4px 4px 0 0;position:relative;min-height:2px}
+  .chart-bar-fill{position:absolute;bottom:0;left:0;right:0;border-radius:4px 4px 0 0}
+  .chart-day{font-size:0.65rem;color:#666;margin-top:6px}
+  .chart-val{font-size:0.7rem;color:#aaa;font-weight:600;margin-bottom:2px}
+
+  .activity-row{display:flex;justify-content:space-between;align-items:center;padding:12px 0;border-bottom:1px solid #1a1a1a;font-size:0.87rem}
+  .activity-row:last-child{border-bottom:none}
+  .activity-info{flex:1}
+  .activity-type{font-weight:600;color:#ddd}
+  .activity-meta{color:#666;font-size:0.78rem;margin-top:2px}
+  .activity-stats{text-align:right;color:#aaa;font-size:0.8rem}
+
+  .rationale{background:#0a0e1a;border-left:3px solid #60a5fa;padding:14px 16px;border-radius:0 12px 12px 0;font-size:0.88rem;color:#ccc;line-height:1.6;margin-top:12px}
+
+  .empty{text-align:center;padding:40px 20px;color:#666}
+  .empty-icon{font-size:3rem;margin-bottom:12px}
+
+  .tab-bar{position:fixed;bottom:0;left:0;right:0;background:#0a0a0a;border-top:1px solid #1f1f1f;display:flex;padding:8px 0 calc(8px + env(safe-area-inset-bottom));z-index:100}
+  .tab{flex:1;text-align:center;padding:6px 0;color:#666;text-decoration:none;font-size:0.7rem;cursor:pointer;font-family:inherit;background:none;border:none}
+  .tab.active{color:#4ade80}
+  .tab-icon{font-size:1.2rem;display:block;margin-bottom:2px}
+
+  .view{display:none}
+  .view.active{display:block}
+
+  .loading{text-align:center;padding:60px 20px;color:#666}
+  .spinner{display:inline-block;width:30px;height:30px;border:3px solid #1f1f1f;border-top-color:#4ade80;border-radius:50%;animation:spin 0.8s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <div>
+      <h1>🚴 Coach</h1>
+      <div class="date" id="dateDisplay"></div>
+    </div>
+    <button class="refresh-btn" id="refreshBtn" onclick="runRefresh()">↻ Run</button>
+  </div>
+
+  <div id="loadingView" class="loading">
+    <div class="spinner"></div>
+    <div style="margin-top:14px">Loading…</div>
+  </div>
+
+  <!-- TODAY VIEW -->
+  <div class="view" id="todayView">
+    <div id="todayContent"></div>
+  </div>
+
+  <!-- TRENDS VIEW -->
+  <div class="view" id="trendsView">
+    <div id="trendsContent"></div>
+  </div>
+
+  <!-- HISTORY VIEW -->
+  <div class="view" id="historyView">
+    <div id="historyContent"></div>
+  </div>
+</div>
+
+<div class="tab-bar">
+  <button class="tab active" data-view="today" onclick="switchView('today')">
+    <span class="tab-icon">📋</span>Today
+  </button>
+  <button class="tab" data-view="trends" onclick="switchView('trends')">
+    <span class="tab-icon">📈</span>Trends
+  </button>
+  <button class="tab" data-view="history" onclick="switchView('history')">
+    <span class="tab-icon">📅</span>History
+  </button>
+</div>
+
+<script>
+let appData = null;
+
+function fmtDate(s){return new Date(s+'T12:00:00').toLocaleDateString('en-US',{weekday:'long',month:'short',day:'numeric'})}
+function fmtShortDate(s){return new Date(s+'T12:00:00').toLocaleDateString('en-US',{month:'numeric',day:'numeric'})}
+function fmtDay(s){return new Date(s+'T12:00:00').toLocaleDateString('en-US',{weekday:'short'})}
+function recColor(p){return p>=67?'green':p>=34?'yellow':'red'}
+function arrow(curr,base){if(curr==null||base==null)return'';const d=curr-base;if(Math.abs(d)<base*0.02)return'<span class="stat-arrow arrow-flat">→</span>';return d>0?'<span class="stat-arrow arrow-up">▲</span>':'<span class="stat-arrow arrow-down">▼</span>'}
+
+async function loadData(){
+  document.getElementById('loadingView').style.display='block';
+  try{
+    const r = await fetch('/api/data');
+    appData = await r.json();
+    renderAll();
+  }catch(e){
+    document.getElementById('loadingView').innerHTML = '<div style="color:#f87171">Error: '+e.message+'</div>';
+    return;
+  }
+  document.getElementById('loadingView').style.display='none';
+}
+
+async function runRefresh(){
+  const btn = document.getElementById('refreshBtn');
+  btn.disabled = true;
+  btn.textContent = '⏳ Running…';
+  try{
+    const r = await fetch('/api/run', { method: 'POST' });
+    const data = await r.json();
+    if(!data.success) throw new Error(data.error);
+    await loadData();
+  }catch(e){
+    alert('Run failed: '+e.message);
+  }
+  btn.disabled = false;
+  btn.textContent = '↻ Run';
+}
+
+function switchView(name){
+  document.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  document.getElementById(name+'View').classList.add('active');
+  document.querySelector('[data-view="'+name+'"]').classList.add('active');
+}
+
+function renderAll(){
+  if(!appData) return;
+  document.getElementById('dateDisplay').textContent = new Date().toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric'});
+  renderToday();
+  renderTrends();
+  renderHistory();
+  document.getElementById('todayView').classList.add('active');
+}
+
+function renderToday(){
+  const el = document.getElementById('todayContent');
+  const snap = appData.snapshots[0];
+  const presc = appData.prescriptions[0];
+
+  if(!snap || !presc){
+    el.innerHTML = '<div class="empty"><div class="empty-icon">🌱</div><div>No data yet — tap <b>Run</b> to pull from WHOOP and Strava.</div></div>';
+    return;
+  }
+
+  const p = presc.full_response;
+  const recCol = recColor(snap.recovery_pct);
+  const acStatus = snap.acute_chronic_ratio < 0.8 ? 'detraining' : snap.acute_chronic_ratio < 1.3 ? 'optimal' : snap.acute_chronic_ratio < 1.5 ? 'building' : 'overreaching';
+  const acCol = snap.acute_chronic_ratio < 1.3 ? 'green' : snap.acute_chronic_ratio < 1.5 ? 'yellow' : 'red';
+
+  el.innerHTML = \`
+    <div class="recovery-hero \${recCol}">
+      <div class="recovery-label">Recovery</div>
+      <div class="recovery-pct \${recCol}">\${snap.recovery_pct ?? '—'}<span style="font-size:1.5rem">%</span></div>
+      <div class="recovery-headline">\${p?.headline || ''}</div>
+    </div>
+
+    <div class="stat-grid">
+      <div class="stat-tile">
+        <div class="stat-label">HRV</div>
+        <div class="stat-value">\${snap.hrv?.toFixed?.(0) ?? '—'}\${arrow(snap.hrv, appData.benchmarks.hrvBaseline)}</div>
+        <div class="stat-sub">ms · base \${appData.benchmarks.hrvBaseline}</div>
+      </div>
+      <div class="stat-tile">
+        <div class="stat-label">RHR</div>
+        <div class="stat-value">\${snap.rhr ?? '—'}\${arrow(appData.benchmarks.restingHrBaseline, snap.rhr)}</div>
+        <div class="stat-sub">bpm · base \${appData.benchmarks.restingHrBaseline}</div>
+      </div>
+      <div class="stat-tile">
+        <div class="stat-label">Sleep</div>
+        <div class="stat-value">\${snap.sleep_hours?.toFixed?.(1) ?? '—'}<span style="font-size:0.85rem">h</span></div>
+        <div class="stat-sub">\${snap.deep_sleep_min ?? '—'} deep</div>
+      </div>
+      <div class="stat-tile">
+        <div class="stat-label">Strain Yest</div>
+        <div class="stat-value blue">\${snap.yesterday_strain?.toFixed?.(1) ?? '—'}</div>
+        <div class="stat-sub">/ 21</div>
+      </div>
+      <div class="stat-tile">
+        <div class="stat-label">AC Ratio</div>
+        <div class="stat-value \${acCol}">\${snap.acute_chronic_ratio ?? '—'}</div>
+        <div class="stat-sub">\${acStatus}</div>
+      </div>
+      <div class="stat-tile">
+        <div class="stat-label">Wkly Avg</div>
+        <div class="stat-value">\${snap.weekly_strain_avg?.toFixed?.(1) ?? '—'}</div>
+        <div class="stat-sub">strain</div>
+      </div>
+    </div>
+
+    \${p?.workout ? \`
+    <div class="section">
+      <div class="section-title">
+        <h2>Today's Workout</h2>
+        <div class="meta">\${p.workout.duration_min || '—'} min · \${p.workout.type || '—'}</div>
+      </div>
+      <div class="card">
+        <div class="card-header">
+          <div class="card-icon">\${workoutEmoji(p.workout.primary_modality)}</div>
+          <div class="card-title" style="flex:1;margin-left:12px">\${(p.workout.primary_modality || '').toUpperCase()}</div>
+        </div>
+        <div class="workout-meta">
+          \${p.workout.intensity_zone ? '<span>🎯 '+p.workout.intensity_zone+'</span>' : ''}
+          \${p.workout.duration_min ? '<span>⏱ '+p.workout.duration_min+' min</span>' : ''}
+        </div>
+        <div class="workout-detail">\${p.workout.specific_workout || ''}</div>
+        \${p.workout.route_suggestion ? \`<div class="workout-route">📍 \${p.workout.route_suggestion}</div>\` : ''}
+        \${p.workout.alternates ? \`<div class="workout-route"><b>Alternates:</b> \${p.workout.alternates}</div>\` : ''}
+        \${p.workout.skip_if ? \`<div class="workout-skip">⚠️ Skip if: \${p.workout.skip_if}</div>\` : ''}
+      </div>
+    </div>\` : ''}
+
+    \${p?.nutrition ? \`
+    <div class="section">
+      <div class="section-title"><h2>Nutrition</h2><div class="meta">\${p.nutrition.hydration_target_oz || '—'} oz water</div></div>
+      <div class="card">
+        \${p.nutrition.pre_workout ? nutritionRow('Pre', p.nutrition.pre_workout) : ''}
+        \${p.nutrition.intra_workout ? nutritionRow('Intra', p.nutrition.intra_workout) : ''}
+        \${p.nutrition.post_workout ? nutritionRow('Post', p.nutrition.post_workout) : ''}
+        \${nutritionRow('Breakfast', p.nutrition.breakfast)}
+        \${nutritionRow('Lunch', p.nutrition.lunch)}
+        \${nutritionRow('Dinner', p.nutrition.dinner)}
+        \${nutritionRow('Supps', p.nutrition.supplements)}
+      </div>
+    </div>\` : ''}
+
+    \${p?.rationale ? \`
+    <div class="section">
+      <div class="section-title"><h2>Why this prescription</h2></div>
+      <div class="rationale">\${p.rationale}</div>
+    </div>\` : ''}
+
+    \${p?.flags?.length ? \`
+    <div class="section">
+      <div class="section-title"><h2>Flags</h2></div>
+      <div>\${p.flags.map(f=>'<span class="flag">⚠ '+f.replace(/_/g,' ')+'</span>').join('')}</div>
+    </div>\` : ''}
+  \`;
+}
+
+function nutritionRow(label, val){
+  return \`<div class="nutrition-row"><div class="nutrition-label">\${label}</div><div class="nutrition-value">\${val||'—'}</div></div>\`;
+}
+
+function workoutEmoji(m){
+  const map = {cycling:'🚴', strength:'🏋️', run:'🏃', rest:'😴', cross_train:'🤸', mixed:'🔀'};
+  return map[m] || '💪';
+}
+
+function renderTrends(){
+  const el = document.getElementById('trendsContent');
+  const snaps = [...appData.snapshots].reverse(); // oldest first
+
+  if(snaps.length === 0){
+    el.innerHTML = '<div class="empty">No trend data yet.</div>';
+    return;
+  }
+
+  // Recovery chart
+  const maxRec = 100;
+  const recBars = snaps.map(s => {
+    const h = ((s.recovery_pct||0) / maxRec) * 100;
+    const col = recColor(s.recovery_pct);
+    return \`<div class="chart-col">
+      <div class="chart-val \${col}">\${s.recovery_pct||'—'}</div>
+      <div class="chart-bar" style="height:80px">
+        <div class="chart-bar-fill \${col}" style="height:\${h}%;background:currentColor"></div>
+      </div>
+      <div class="chart-day">\${fmtDay(s.date)}</div>
+    </div>\`;
+  }).join('');
+
+  // Strain chart
+  const maxStrain = Math.max(21, ...snaps.map(s => s.yesterday_strain || 0));
+  const strainBars = snaps.map(s => {
+    const v = s.yesterday_strain || 0;
+    const h = (v / maxStrain) * 100;
+    return \`<div class="chart-col">
+      <div class="chart-val blue">\${v.toFixed(1)}</div>
+      <div class="chart-bar" style="height:80px">
+        <div class="chart-bar-fill blue" style="height:\${h}%;background:currentColor"></div>
+      </div>
+      <div class="chart-day">\${fmtDay(s.date)}</div>
+    </div>\`;
+  }).join('');
+
+  // HRV chart
+  const hrvVals = snaps.map(s => s.hrv).filter(v => v != null);
+  const minHrv = hrvVals.length ? Math.min(...hrvVals) - 5 : 0;
+  const maxHrv = hrvVals.length ? Math.max(...hrvVals) + 5 : 100;
+  const hrvBars = snaps.map(s => {
+    if(s.hrv == null) return \`<div class="chart-col"><div class="chart-val">—</div><div class="chart-bar" style="height:80px"></div><div class="chart-day">\${fmtDay(s.date)}</div></div>\`;
+    const h = ((s.hrv - minHrv) / (maxHrv - minHrv)) * 100;
+    return \`<div class="chart-col">
+      <div class="chart-val purple">\${s.hrv.toFixed(0)}</div>
+      <div class="chart-bar" style="height:80px">
+        <div class="chart-bar-fill purple" style="height:\${h}%;background:currentColor"></div>
+      </div>
+      <div class="chart-day">\${fmtDay(s.date)}</div>
+    </div>\`;
+  }).join('');
+
+  // Sleep chart
+  const sleepBars = snaps.map(s => {
+    const v = s.sleep_hours || 0;
+    const h = (v / 10) * 100;
+    return \`<div class="chart-col">
+      <div class="chart-val">\${v.toFixed(1)}</div>
+      <div class="chart-bar" style="height:80px">
+        <div class="chart-bar-fill blue" style="height:\${h}%;background:#60a5fa"></div>
+      </div>
+      <div class="chart-day">\${fmtDay(s.date)}</div>
+    </div>\`;
+  }).join('');
+
+  el.innerHTML = \`
+    <div class="section">
+      <div class="section-title"><h2>Recovery (last \${snaps.length} days)</h2></div>
+      <div class="card"><div class="chart-row">\${recBars}</div></div>
+    </div>
+    <div class="section">
+      <div class="section-title"><h2>HRV trend</h2></div>
+      <div class="card"><div class="chart-row">\${hrvBars}</div></div>
+    </div>
+    <div class="section">
+      <div class="section-title"><h2>Daily strain</h2></div>
+      <div class="card"><div class="chart-row">\${strainBars}</div></div>
+    </div>
+    <div class="section">
+      <div class="section-title"><h2>Sleep hours</h2></div>
+      <div class="card"><div class="chart-row">\${sleepBars}</div></div>
+    </div>
+  \`;
+}
+
+function renderHistory(){
+  const el = document.getElementById('historyContent');
+  const items = appData.prescriptions;
+  const acts = appData.activities;
+
+  if(items.length === 0){
+    el.innerHTML = '<div class="empty">No history yet.</div>';
+    return;
+  }
+
+  const prescHtml = items.map(p => {
+    const fr = p.full_response;
+    const w = fr.workout || {};
+    return \`<div class="card">
+      <div class="card-header">
+        <div>
+          <div style="color:#666;font-size:0.75rem">\${fmtDate(p.date)}</div>
+          <div class="card-title" style="margin-top:4px">\${fr.headline || p.workout_type || '—'}</div>
+        </div>
+        <div class="card-icon">\${workoutEmoji(w.primary_modality)}</div>
+      </div>
+      <div class="workout-meta">
+        \${w.duration_min ? '<span>⏱ '+w.duration_min+'m</span>' : ''}
+        \${w.intensity_zone ? '<span>🎯 '+w.intensity_zone+'</span>' : ''}
+        \${w.type ? '<span>'+w.type+'</span>' : ''}
+      </div>
+      <div style="font-size:0.85rem;color:#bbb;line-height:1.5">\${(w.specific_workout || '').slice(0,200)}\${w.specific_workout?.length > 200 ? '…' : ''}</div>
+    </div>\`;
+  }).join('');
+
+  const actsHtml = acts.length ? \`
+    <div class="section">
+      <div class="section-title"><h2>Recent Strava Activities</h2></div>
+      <div class="card">
+        \${acts.slice(0,10).map(a => \`<div class="activity-row">
+          <div class="activity-info">
+            <div class="activity-type">\${a.type} · \${fmtShortDate(a.date)}</div>
+            <div class="activity-meta">\${a.distance_m ? (a.distance_m/1000).toFixed(1)+'km' : ''} \${a.elevation_gain_m ? '· '+Math.round(a.elevation_gain_m)+'m gain' : ''}</div>
+          </div>
+          <div class="activity-stats">
+            \${a.duration_sec ? Math.round(a.duration_sec/60)+' min' : ''}<br>
+            \${a.avg_hr ? '<span style="color:#f87171">'+Math.round(a.avg_hr)+'bpm</span>' : ''}\${a.avg_power ? ' · <span style="color:#facc15">'+Math.round(a.avg_power)+'W</span>' : ''}
+          </div>
+        </div>\`).join('')}
+      </div>
+    </div>\` : '';
+
+  el.innerHTML = \`
+    <div class="section">
+      <div class="section-title"><h2>Recent Prescriptions</h2></div>
+      \${prescHtml}
+    </div>
+    \${actsHtml}
+  \`;
+}
+
+loadData();
+</script>
+</body>
+</html>`);
 });
 
 // Privacy policy (required by WHOOP for app approval)
