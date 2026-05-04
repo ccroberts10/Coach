@@ -430,6 +430,47 @@ function buildCoachContext(whoop, strava, weather) {
       suffer: a.suffer_score,
     }));
 
+  // Strength session tracking — check both WHOOP weightlifting workouts and Strava
+  // (Casey logs lifts via WHOOP primarily, occasionally Strava)
+  const whoopWorkouts = whoop.workouts?.records || [];
+  const whoopStrengthSessions = whoopWorkouts
+    .filter(w => {
+      const wDate = new Date(w.start).getTime();
+      return wDate >= cutoff && /weight|strength|lift/i.test(w.sport_name || '');
+    })
+    .map(w => ({
+      source: 'whoop',
+      date: w.start.slice(0, 10),
+      sport: w.sport_name,
+      duration_min: Math.round((new Date(w.end) - new Date(w.start)) / 60000),
+      strain: w.score?.strain,
+      avg_hr: w.score?.average_heart_rate,
+    }));
+
+  const stravaStrengthSessions = strava
+    .filter(a => {
+      const aDate = new Date(a.start_date).getTime();
+      return aDate >= cutoff && /weight|workout|crossfit/i.test(a.type || '');
+    })
+    .map(a => ({
+      source: 'strava',
+      date: a.start_date.slice(0, 10),
+      sport: a.type,
+      duration_min: Math.round(a.moving_time / 60),
+    }));
+
+  // Dedupe by date — if both sources logged a session same day, count once
+  const allStrengthDates = new Set([
+    ...whoopStrengthSessions.map(s => s.date),
+    ...stravaStrengthSessions.map(s => s.date),
+  ]);
+
+  // Days since last strength session (across both sources)
+  const lastStrengthDate = [...allStrengthDates].sort().reverse()[0];
+  const daysSinceLastStrength = lastStrengthDate
+    ? Math.floor((Date.now() - new Date(lastStrengthDate).getTime()) / (1000 * 60 * 60 * 24))
+    : 999;
+
   return {
     today: new Date().toISOString().slice(0, 10),
     dayOfWeek: new Date().toLocaleDateString('en-US', { weekday: 'long' }),
@@ -473,6 +514,18 @@ function buildCoachContext(whoop, strava, weather) {
                 : 'overreaching (high injury risk)',
     },
     weekly_distribution: distribution,
+    strength_tracking: {
+      sessions_last_7d: allStrengthDates.size,
+      days_since_last_session: daysSinceLastStrength,
+      last_session_date: lastStrengthDate || null,
+      sessions_detail: [...whoopStrengthSessions, ...stravaStrengthSessions]
+        .sort((a, b) => b.date.localeCompare(a.date)),
+      target_per_week: 2,
+      status: allStrengthDates.size >= 2 ? 'on_target'
+            : allStrengthDates.size === 1 ? 'one_more_needed_this_week'
+            : daysSinceLastStrength >= 7 ? 'overdue_two_sessions'
+            : 'overdue_one_session',
+    },
     recent_activities_7d: recentActivities,
   };
 }
@@ -506,6 +559,22 @@ Weekly distribution targets (polarized model):
 Interference effect:
 - Heavy leg day within 48hr of hard cycling intervals = both suffer. Avoid.
 - Upper body strength can pair with cycling days fine.
+
+STRENGTH PROGRAMMING (NON-NEGOTIABLE — Casey trains 2x/week minimum):
+- Casey trains at home with FULL gym equipment: barbell + plates, rack, bench, dumbbells, kettlebells, pull-up bar, bands. Prescribe accordingly.
+- TARGET: 2 strength sessions per week, every week. This is enforced even when cycling recovery is green.
+- Style: hybrid of full-body compound work + cyclist-specific accessory work (single-leg, posterior chain, core, hip stability).
+- Track strength sessions in the last 7 days from WHOOP workouts (sport_name "weightlifting") and Strava (type "WeightTraining" or "Workout"). If <2 sessions in last 7 days, today's prescription should bias strongly toward strength UNLESS recovery is red OR the AC ratio override forces rest.
+- If 0 strength sessions in last 7 days AND today is anything but red recovery: TODAY IS STRENGTH. Override cycling prescription.
+- Smart scheduling — never prescribe heavy bilateral leg work (squat, deadlift) the day before a planned hard ride. Use upper body or single-leg unilateral work instead.
+- Session structure (60 min target):
+  * Warmup 5 min: leg swings, hip circles, glute bridges, band pull-aparts
+  * Main lift 1 (compound, 4-5 sets): squat / deadlift / bench / OHP — alternate across sessions
+  * Main lift 2 (compound or unilateral, 3-4 sets): pull-up, row, RDL, split squat, lunge variation
+  * Cyclist accessory (3 sets each): single-leg RDL or step-up, copenhagen plank or side plank, dead bug or pallof press
+  * Optional finisher: KB swings, farmer carries, or hip thrusts
+- Use RPE-based prescriptions (no 1RM data available): RPE 7-8 for main lifts, RPE 6-7 for accessories. Format like "4x6 @ RPE 7-8 (~2-3 reps in reserve)"
+- For cycling-friendly strength programming reference: the goal is functional strength + injury resistance, not hypertrophy or max strength. Lower volume, moderate-heavy loads.
 
 Sleep-driven adjustments:
 - Deep sleep <60 min → reduce intensity, push magnesium glycinate + carbs at dinner
