@@ -114,6 +114,15 @@ db.exec(`
     error_message TEXT,
     updated_at INTEGER
   );
+
+  CREATE TABLE IF NOT EXISTS workout_feedback (
+    date TEXT PRIMARY KEY,
+    status TEXT,
+    note TEXT,
+    rpe INTEGER,
+    created_at INTEGER,
+    updated_at INTEGER
+  );
 `);
 
 console.log(`[db] Initialized at ${DB_PATH}`);
@@ -526,8 +535,39 @@ function buildCoachContext(whoop, strava, weather) {
             : daysSinceLastStrength >= 7 ? 'overdue_two_sessions'
             : 'overdue_one_session',
     },
+    prescription_history_14d: getPrescriptionHistoryWithFeedback(),
     recent_activities_7d: recentActivities,
   };
+}
+
+// Build a 14-day rolling history of what was prescribed vs what actually happened
+function getPrescriptionHistoryWithFeedback() {
+  const cutoff = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const rows = db.prepare(`
+    SELECT p.date, p.workout_type, p.duration_min, p.intensity, p.full_response,
+           f.status as feedback_status, f.note as feedback_note, f.rpe as feedback_rpe
+    FROM prescriptions p
+    LEFT JOIN workout_feedback f ON p.date = f.date
+    WHERE p.date >= ?
+    ORDER BY p.date DESC
+  `).all(cutoff);
+
+  return rows.map(r => {
+    const parsed = JSON.parse(r.full_response || '{}');
+    return {
+      date: r.date,
+      prescribed: {
+        type: r.workout_type,
+        duration_min: r.duration_min,
+        headline: parsed.headline,
+      },
+      feedback: r.feedback_status ? {
+        status: r.feedback_status,
+        note: r.feedback_note,
+        rpe: r.feedback_rpe,
+      } : null,
+    };
+  });
 }
 
 // =================== CLAUDE COACH PROMPT ===================
@@ -607,6 +647,18 @@ NUTRITION PRINCIPLES:
 - Magnesium glycinate 300mg before bed (always)
 - Tart cherry juice 8oz after hard sessions (anti-inflammatory + melatonin)
 - No caffeine after noon, no alcohol within 3hr of bed
+
+LEARNING FROM PRESCRIPTION HISTORY (CRITICAL):
+The context includes prescription_history_14d — a record of what you prescribed each day and what actually happened (feedback status: did_it / modified / skipped, with optional note and RPE). USE THIS:
+
+- If Casey marked recent prescriptions "skipped" with notes about being too hard/tired → reduce intensity bias for this week, prioritize what they're actually willing to do
+- If Casey marked "modified" with notes → respect their adaptation pattern. Example: "modified — did 3x10 instead of 4x6" tells you they prefer higher reps
+- If Casey marked "did_it" with high RPE notes → the prescriptions are well-calibrated, continue
+- If Casey marked "did_it" with low RPE notes → prescriptions may be too easy, push harder when recovery permits
+- If a strength prescription was skipped multiple times → diagnose: is it timing? equipment? motivation? Address it directly in today's rationale, don't just re-prescribe the same thing
+- If patterns emerge across 7+ days (e.g., always skips Monday lifts, always crushes Saturday rides) → adapt the weekly structure to fit reality, not theory
+- When recent prescriptions were skipped, acknowledge it briefly in the rationale ("noticed you skipped Tuesday's strength — let's get a session in today since legs are fresh") rather than ignoring it
+- NEVER lecture about skipped workouts. Be a coach, not a parent.
 
 OUTPUT FORMAT — return ONLY valid JSON, no preamble, no markdown:
 {
@@ -888,12 +940,20 @@ app.get('/api/data', async (req, res) => {
   const snapshots = db.prepare(`SELECT * FROM daily_snapshots ORDER BY date DESC LIMIT 14`).all();
   const prescriptions = db.prepare(`SELECT * FROM prescriptions ORDER BY date DESC LIMIT 14`).all();
   const activities = db.prepare(`SELECT * FROM activities ORDER BY date DESC LIMIT 14`).all();
+  const feedback = db.prepare(`SELECT * FROM workout_feedback ORDER BY date DESC LIMIT 14`).all();
+  // Index feedback by date for easy joining
+  const feedbackByDate = {};
+  feedback.forEach(f => { feedbackByDate[f.date] = f; });
   // Pull weather live (cheap, fresh) but don't block dashboard if it fails
   let weather = null;
   try { weather = await getWeather(); } catch(e) {}
   res.json({
     snapshots,
-    prescriptions: prescriptions.map(p => ({ ...p, full_response: JSON.parse(p.full_response || '{}') })),
+    prescriptions: prescriptions.map(p => ({
+      ...p,
+      full_response: JSON.parse(p.full_response || '{}'),
+      feedback: feedbackByDate[p.date] || null,
+    })),
     activities: activities.map(a => ({ ...a, raw_strava: undefined })),
     benchmarks: BENCHMARKS,
     weather,
@@ -902,6 +962,24 @@ app.get('/api/data', async (req, res) => {
       strava: getConnectionStatus('strava') || { service: 'strava', status: getToken('strava') ? 'connected' : 'disconnected' },
     },
   });
+});
+
+// Save workout feedback
+app.post('/api/feedback', (req, res) => {
+  const { date, status, note, rpe } = req.body;
+  if (!date || !status) return res.status(400).json({ error: 'date and status required' });
+  const validStatus = ['did_it', 'modified', 'skipped'];
+  if (!validStatus.includes(status)) return res.status(400).json({ error: 'invalid status' });
+  const now = Date.now();
+  const existing = db.prepare(`SELECT * FROM workout_feedback WHERE date = ?`).get(date);
+  if (existing) {
+    db.prepare(`UPDATE workout_feedback SET status = ?, note = ?, rpe = ?, updated_at = ? WHERE date = ?`)
+      .run(status, note || null, rpe || null, now, date);
+  } else {
+    db.prepare(`INSERT INTO workout_feedback (date, status, note, rpe, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`)
+      .run(date, status, note || null, rpe || null, now, now);
+  }
+  res.json({ success: true });
 });
 
 // Trigger run from dashboard (browser-friendly, POST returns JSON)
@@ -1013,6 +1091,20 @@ app.get('/dashboard', (req, res) => {
   .reconnect-btn{background:#facc15;color:#000;border:none;padding:9px 16px;border-radius:8px;font-size:0.85rem;font-weight:600;text-decoration:none;white-space:nowrap;cursor:pointer;font-family:inherit}
   .reconnect-btn:active{transform:scale(0.97)}
   .reconnect-btn.error{background:#f87171}
+
+  .feedback-section{margin-top:14px;padding-top:14px;border-top:1px solid #1f1f1f}
+  .feedback-label{color:#666;font-size:0.7rem;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:8px}
+  .feedback-buttons{display:flex;gap:8px;margin-bottom:10px}
+  .fb-btn{flex:1;padding:10px 8px;background:#1a1a1a;border:1px solid #2a2a2a;border-radius:10px;color:#aaa;font-size:0.8rem;cursor:pointer;font-family:inherit;transition:all 0.15s;font-weight:500}
+  .fb-btn:active{transform:scale(0.97)}
+  .fb-btn.active.did_it{background:#0d2818;border-color:#1f5a35;color:#4ade80}
+  .fb-btn.active.modified{background:#1f1d0d;border-color:#5a4a1f;color:#facc15}
+  .fb-btn.active.skipped{background:#1f0d0d;border-color:#5a2828;color:#f87171}
+  .fb-note{width:100%;background:#0a0a0a;border:1px solid #2a2a2a;border-radius:10px;color:#ddd;padding:10px 12px;font-size:0.85rem;font-family:inherit;resize:none;margin-top:6px;box-sizing:border-box}
+  .fb-note::placeholder{color:#555}
+  .fb-note:focus{outline:none;border-color:#444}
+  .fb-saved{color:#4ade80;font-size:0.75rem;margin-left:8px;display:inline-block;opacity:0;transition:opacity 0.3s}
+  .fb-saved.show{opacity:1}
 </style>
 </head>
 <body>
@@ -1238,6 +1330,16 @@ function renderToday(){
         \${p.workout.route_suggestion ? \`<div class="workout-route">📍 \${p.workout.route_suggestion}</div>\` : ''}
         \${p.workout.alternates ? \`<div class="workout-route"><b>Alternates:</b> \${p.workout.alternates}</div>\` : ''}
         \${p.workout.skip_if ? \`<div class="workout-skip">⚠️ Skip if: \${p.workout.skip_if}</div>\` : ''}
+
+        <div class="feedback-section">
+          <div class="feedback-label">How did it go?<span class="fb-saved" id="fbSaved">✓ saved</span></div>
+          <div class="feedback-buttons">
+            <button class="fb-btn did_it \${presc.feedback?.status === 'did_it' ? 'active' : ''}" data-status="did_it" onclick="saveFeedback('\${presc.date}', 'did_it')">✅ Did it</button>
+            <button class="fb-btn modified \${presc.feedback?.status === 'modified' ? 'active' : ''}" data-status="modified" onclick="saveFeedback('\${presc.date}', 'modified')">🔧 Modified</button>
+            <button class="fb-btn skipped \${presc.feedback?.status === 'skipped' ? 'active' : ''}" data-status="skipped" onclick="saveFeedback('\${presc.date}', 'skipped')">⏭️ Skipped</button>
+          </div>
+          <textarea class="fb-note" id="fbNote" placeholder="Optional note: how the legs felt, what you actually did, RPE, anything…" rows="2" onblur="saveFeedbackNote('\${presc.date}')">\${presc.feedback?.note || ''}</textarea>
+        </div>
       </div>
     </div>\` : ''}
 
@@ -1276,6 +1378,47 @@ function nutritionRow(label, val){
 function workoutEmoji(m){
   const map = {cycling:'🚴', strength:'🏋️', run:'🏃', rest:'😴', cross_train:'🤸', mixed:'🔀'};
   return map[m] || '💪';
+}
+
+async function saveFeedback(date, status){
+  // Toggle visual state immediately
+  document.querySelectorAll('.fb-btn').forEach(b => b.classList.remove('active'));
+  document.querySelector('.fb-btn[data-status="'+status+'"]').classList.add('active', status);
+  const note = document.getElementById('fbNote')?.value || '';
+  try {
+    await fetch('/api/feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ date, status, note }),
+    });
+    showSaved();
+    // Refresh underlying data so subsequent renders have the right state
+    if(appData?.prescriptions?.[0]) appData.prescriptions[0].feedback = { status, note };
+  } catch(e) { console.error('Feedback save failed', e); }
+}
+
+async function saveFeedbackNote(date){
+  const noteEl = document.getElementById('fbNote');
+  if (!noteEl) return;
+  const note = noteEl.value;
+  const status = appData?.prescriptions?.[0]?.feedback?.status;
+  if (!status) return; // Only save note if status is set
+  try {
+    await fetch('/api/feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ date, status, note }),
+    });
+    showSaved();
+    if(appData?.prescriptions?.[0]) appData.prescriptions[0].feedback = { status, note };
+  } catch(e) { console.error('Note save failed', e); }
+}
+
+function showSaved(){
+  const el = document.getElementById('fbSaved');
+  if (!el) return;
+  el.classList.add('show');
+  setTimeout(() => el.classList.remove('show'), 1500);
 }
 
 function renderTrends(){
@@ -1377,10 +1520,16 @@ function renderHistory(){
   const prescHtml = items.map(p => {
     const fr = p.full_response;
     const w = fr.workout || {};
+    const fb = p.feedback;
+    const fbBadge = fb ? \`<span style="display:inline-block;padding:2px 8px;border-radius:6px;font-size:0.7rem;margin-left:6px;\${
+      fb.status === 'did_it' ? 'background:#0d2818;color:#4ade80' :
+      fb.status === 'modified' ? 'background:#1f1d0d;color:#facc15' :
+      'background:#1f0d0d;color:#f87171'
+    }">\${fb.status === 'did_it' ? '✓ done' : fb.status === 'modified' ? '🔧 modified' : '⏭ skipped'}</span>\` : '';
     return \`<div class="card">
       <div class="card-header">
         <div>
-          <div style="color:#666;font-size:0.75rem">\${fmtDate(p.date)}</div>
+          <div style="color:#666;font-size:0.75rem">\${fmtDate(p.date)}\${fbBadge}</div>
           <div class="card-title" style="margin-top:4px">\${fr.headline || p.workout_type || '—'}</div>
         </div>
         <div class="card-icon">\${workoutEmoji(w.primary_modality)}</div>
@@ -1391,6 +1540,7 @@ function renderHistory(){
         \${w.type ? '<span>'+w.type+'</span>' : ''}
       </div>
       <div style="font-size:0.85rem;color:#bbb;line-height:1.5">\${(w.specific_workout || '').slice(0,200)}\${w.specific_workout?.length > 200 ? '…' : ''}</div>
+      \${fb?.note ? \`<div style="margin-top:10px;padding:10px 12px;background:#0a0a0a;border-radius:8px;font-size:0.8rem;color:#aaa;font-style:italic">"\${fb.note}"</div>\` : ''}
     </div>\`;
   }).join('');
 
