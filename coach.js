@@ -633,8 +633,12 @@ const app = express();
 app.use(express.json());
 
 // OAuth flows
+const crypto = require('crypto');
+
 app.get('/auth/whoop', (req, res) => {
-  const url = `https://api.prod.whoop.com/oauth/oauth2/auth?client_id=${WHOOP_CLIENT_ID}&redirect_uri=${encodeURIComponent(REDIRECT_URI + '/auth/whoop/callback')}&response_type=code&scope=read:recovery%20read:sleep%20read:cycles%20read:workout%20read:profile%20read:body_measurement&state=coach`;
+  const state = crypto.randomBytes(16).toString('hex');
+  saveToken('whoop_state', state, '', Date.now() + 10 * 60 * 1000);
+  const url = `https://api.prod.whoop.com/oauth/oauth2/auth?client_id=${WHOOP_CLIENT_ID}&redirect_uri=${encodeURIComponent(REDIRECT_URI + '/auth/whoop/callback')}&response_type=code&scope=read:recovery%20read:sleep%20read:cycles%20read:workout%20read:profile%20read:body_measurement&state=${state}`;
   res.redirect(url);
 });
 
