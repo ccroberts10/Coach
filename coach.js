@@ -640,20 +640,46 @@ app.get('/auth/whoop', (req, res) => {
 
 app.get('/auth/whoop/callback', async (req, res) => {
   try {
-    const { code } = req.query;
-    const tokenRes = await (await fetch('https://api.prod.whoop.com/oauth/oauth2/token', {
+    const { code, error, error_description } = req.query;
+    if (error) {
+      console.error('[whoop callback] WHOOP returned error:', error, error_description);
+      return res.status(400).send(`WHOOP error: ${error} - ${error_description}`);
+    }
+    if (!code) {
+      console.error('[whoop callback] No code in query:', req.query);
+      return res.status(400).send('No authorization code received');
+    }
+
+    const redirectUri = REDIRECT_URI + '/auth/whoop/callback';
+    console.log('[whoop callback] Exchanging code, redirect_uri:', redirectUri);
+
+    const body = new URLSearchParams({
+      grant_type: 'authorization_code',
+      code,
+      client_id: WHOOP_CLIENT_ID,
+      client_secret: WHOOP_CLIENT_SECRET,
+      redirect_uri: redirectUri,
+    });
+
+    const tokenResponse = await fetch('https://api.prod.whoop.com/oauth/oauth2/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        grant_type: 'authorization_code', code,
-        client_id: WHOOP_CLIENT_ID, client_secret: WHOOP_CLIENT_SECRET,
-        redirect_uri: REDIRECT_URI + '/auth/whoop/callback',
-      }),
-    })).json();
-    if (!tokenRes.access_token) return res.status(400).json(tokenRes);
+      body: body.toString(),
+    });
+
+    const tokenRes = await tokenResponse.json();
+    console.log('[whoop callback] Token response status:', tokenResponse.status);
+    console.log('[whoop callback] Token response body:', JSON.stringify(tokenRes));
+
+    if (!tokenRes.access_token) {
+      return res.status(400).json(tokenRes);
+    }
     saveToken('whoop', tokenRes.access_token, tokenRes.refresh_token, Date.now() + tokenRes.expires_in * 1000);
     res.send('✅ WHOOP connected. You can close this tab.');
-  } catch (e) { res.status(500).send(e.message); }
+  } catch (e) {
+    console.error('[whoop callback] Exception:', e);
+    res.status(500).send(e.message);
+  }
 });
 
 app.get('/auth/strava', (req, res) => {
