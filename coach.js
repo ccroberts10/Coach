@@ -107,6 +107,13 @@ db.exec(`
     delivered INTEGER DEFAULT 0,
     created_at INTEGER
   );
+
+  CREATE TABLE IF NOT EXISTS connection_status (
+    service TEXT PRIMARY KEY,
+    status TEXT,
+    error_message TEXT,
+    updated_at INTEGER
+  );
 `);
 
 console.log(`[db] Initialized at ${DB_PATH}`);
@@ -121,28 +128,54 @@ function getToken(service) {
   return db.prepare(`SELECT * FROM tokens WHERE service = ?`).get(service);
 }
 
+function setConnectionStatus(service, status, errorMessage) {
+  db.prepare(`INSERT OR REPLACE INTO connection_status (service, status, error_message, updated_at) VALUES (?, ?, ?, ?)`)
+    .run(service, status, errorMessage || null, Date.now());
+}
+
+function getConnectionStatus(service) {
+  return db.prepare(`SELECT * FROM connection_status WHERE service = ?`).get(service);
+}
+
 async function refreshWhoopToken() {
   const t = getToken('whoop');
-  if (!t) throw new Error('No WHOOP token. Visit /auth/whoop first.');
-  const res = await (await fetch('https://api.prod.whoop.com/oauth/oauth2/token', {
+  if (!t) {
+    setConnectionStatus('whoop', 'disconnected', 'No WHOOP token. Reconnect to begin.');
+    throw new Error('No WHOOP token. Visit /auth/whoop first.');
+  }
+
+  // WHOOP requires client credentials in the body of refresh requests
+  const body = new URLSearchParams({
+    grant_type: 'refresh_token',
+    refresh_token: t.refresh_token,
+    client_id: WHOOP_CLIENT_ID,
+    client_secret: WHOOP_CLIENT_SECRET,
+  });
+
+  const res = await fetch('https://api.prod.whoop.com/oauth/oauth2/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      grant_type: 'refresh_token',
-      refresh_token: t.refresh_token,
-      client_id: WHOOP_CLIENT_ID,
-      client_secret: WHOOP_CLIENT_SECRET,
-      scope: 'read:recovery read:sleep read:cycles read:workout read:profile read:body_measurement',
-    }),
-  })).json();
-  if (!res.access_token) throw new Error(`WHOOP refresh failed: ${JSON.stringify(res)}`);
-  saveToken('whoop', res.access_token, res.refresh_token, Date.now() + (res.expires_in * 1000));
-  return res.access_token;
+    body: body.toString(),
+  });
+  const data = await res.json();
+  console.log('[whoop refresh] status:', res.status, 'body:', JSON.stringify(data).slice(0, 300));
+
+  if (!data.access_token) {
+    setConnectionStatus('whoop', 'disconnected', `Refresh failed: ${data.error_description || data.error || 'unknown'}`);
+    throw new Error(`WHOOP refresh failed: ${JSON.stringify(data)}`);
+  }
+  // WHOOP rotates refresh tokens — save the new one
+  saveToken('whoop', data.access_token, data.refresh_token || t.refresh_token, Date.now() + (data.expires_in * 1000));
+  setConnectionStatus('whoop', 'connected', null);
+  return data.access_token;
 }
 
 async function refreshStravaToken() {
   const t = getToken('strava');
-  if (!t) throw new Error('No Strava token. Visit /auth/strava first.');
+  if (!t) {
+    setConnectionStatus('strava', 'disconnected', 'No Strava token. Reconnect to begin.');
+    throw new Error('No Strava token. Visit /auth/strava first.');
+  }
   const res = await (await fetch('https://www.strava.com/oauth/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -153,8 +186,12 @@ async function refreshStravaToken() {
       refresh_token: t.refresh_token,
     }),
   })).json();
-  if (!res.access_token) throw new Error(`Strava refresh failed: ${JSON.stringify(res)}`);
+  if (!res.access_token) {
+    setConnectionStatus('strava', 'disconnected', `Refresh failed: ${res.message || res.error || 'unknown'}`);
+    throw new Error(`Strava refresh failed: ${JSON.stringify(res)}`);
+  }
   saveToken('strava', res.access_token, res.refresh_token, res.expires_at * 1000);
+  setConnectionStatus('strava', 'connected', null);
   return res.access_token;
 }
 
@@ -305,16 +342,45 @@ function computeWeeklyDistribution(activities, lthr) {
 async function getWeather() {
   if (!OPENWEATHER_KEY) return null;
   try {
-    const res = await (await fetch(
-      `https://api.openweathermap.org/data/2.5/weather?q=Durango,CO,US&units=imperial&appid=${OPENWEATHER_KEY}`
-    )).json();
+    // Get coordinates for Durango (avoids one geocoding call per request)
+    const lat = 37.2753, lon = -107.8801;
+
+    // Pull current conditions + 5-day/3-hour forecast in parallel
+    const [currentRes, forecastRes] = await Promise.all([
+      fetch(`https://api.openweathermap.org/data/2.5/weather?lat=${lat}&lon=${lon}&units=imperial&appid=${OPENWEATHER_KEY}`),
+      fetch(`https://api.openweathermap.org/data/2.5/forecast?lat=${lat}&lon=${lon}&units=imperial&appid=${OPENWEATHER_KEY}&cnt=4`),
+    ]);
+    const current = await currentRes.json();
+    const forecast = await forecastRes.json();
+
+    // Today's window (next 12 hours)
+    const next12h = (forecast.list || []).slice(0, 4).map(f => ({
+      time: new Date(f.dt * 1000).toLocaleTimeString('en-US', { hour: 'numeric', timeZone: TZ }),
+      temp: Math.round(f.main.temp),
+      feels_like: Math.round(f.main.feels_like),
+      conditions: f.weather[0].main,
+      description: f.weather[0].description,
+      wind_mph: Math.round(f.wind.speed),
+      wind_gust_mph: f.wind.gust ? Math.round(f.wind.gust) : null,
+      precip_chance_pct: Math.round((f.pop || 0) * 100),
+    }));
+
     return {
-      temp: Math.round(res.main.temp),
-      conditions: res.weather[0].main,
-      wind: Math.round(res.wind.speed),
-      description: res.weather[0].description,
+      current: {
+        temp: Math.round(current.main.temp),
+        feels_like: Math.round(current.main.feels_like),
+        conditions: current.weather[0].main,
+        description: current.weather[0].description,
+        wind_mph: Math.round(current.wind.speed),
+        humidity_pct: current.main.humidity,
+      },
+      next_12h: next12h,
+      summary: `${Math.round(current.main.temp)}°F ${current.weather[0].description}, wind ${Math.round(current.wind.speed)}mph. Next 12h range: ${Math.min(...next12h.map(f=>f.temp))}°-${Math.max(...next12h.map(f=>f.temp))}°F.`,
     };
-  } catch (e) { return null; }
+  } catch (e) {
+    console.log('[weather] Failed:', e.message);
+    return null;
+  }
 }
 
 // =================== BUILD CONTEXT FOR CLAUDE ===================
@@ -451,6 +517,16 @@ WORKOUT SPECIFICITY REQUIREMENTS:
 - Strength: give sets × reps and % of 1RM if known, or RPE
 - Always include duration, intensity zone, and a fueling cue (pre/intra/post)
 - Suggest a Durango-area route when cycling outside (Animas River Trail, Hermosa Creek, Junction Creek, La Plata Canyon, Smelter Mountain, Horse Gulch)
+
+WEATHER-AWARE PRESCRIPTIONS:
+When weather data is provided, factor it into recommendations:
+- Cold (<40°F): suggest later-in-day rides, warmer route choices, layering cues
+- Hot (>85°F): suggest morning rides, hydration emphasis (extra 20oz), shaded routes (Animas River Trail), avoid Smelter Mountain exposure
+- Wind >20mph: bias toward sheltered routes, suggest indoor trainer for hard intervals (consistent power) or recommend rescheduling
+- Rain/snow predicted: suggest trainer or strength substitution; never prescribe outdoor intervals in unsafe conditions
+- Fresh snow / icy: trainer or gym only
+- Beautiful weather (50-75°F, low wind, clear): encourage getting outside even on easy days; mention the conditions positively
+- Suggest specific time-of-day when forecast shows a clear window (e.g., "ride before 11am — wind picks up to 25mph by afternoon")
 
 NUTRITION PRINCIPLES:
 - Carbs scaled to today's load: 3-5g/kg rest day, 6-8g/kg moderate, 8-12g/kg heavy training day
@@ -681,6 +757,7 @@ app.get('/auth/whoop/callback', async (req, res) => {
       return res.status(400).json(tokenRes);
     }
     saveToken('whoop', tokenRes.access_token, tokenRes.refresh_token, Date.now() + tokenRes.expires_in * 1000);
+    setConnectionStatus('whoop', 'connected', null);
     res.send('✅ WHOOP connected. You can close this tab.');
   } catch (e) {
     console.error('[whoop callback] Exception:', e);
@@ -706,6 +783,7 @@ app.get('/auth/strava/callback', async (req, res) => {
     })).json();
     if (!tokenRes.access_token) return res.status(400).json(tokenRes);
     saveToken('strava', tokenRes.access_token, tokenRes.refresh_token, tokenRes.expires_at * 1000);
+    setConnectionStatus('strava', 'connected', null);
     res.send('✅ Strava connected. You can close this tab.');
   } catch (e) { res.status(500).send(e.message); }
 });
@@ -737,15 +815,23 @@ app.get('/recent', (req, res) => {
 });
 
 // JSON API for dashboard
-app.get('/api/data', (req, res) => {
+app.get('/api/data', async (req, res) => {
   const snapshots = db.prepare(`SELECT * FROM daily_snapshots ORDER BY date DESC LIMIT 14`).all();
   const prescriptions = db.prepare(`SELECT * FROM prescriptions ORDER BY date DESC LIMIT 14`).all();
   const activities = db.prepare(`SELECT * FROM activities ORDER BY date DESC LIMIT 14`).all();
+  // Pull weather live (cheap, fresh) but don't block dashboard if it fails
+  let weather = null;
+  try { weather = await getWeather(); } catch(e) {}
   res.json({
     snapshots,
     prescriptions: prescriptions.map(p => ({ ...p, full_response: JSON.parse(p.full_response || '{}') })),
     activities: activities.map(a => ({ ...a, raw_strava: undefined })),
     benchmarks: BENCHMARKS,
+    weather,
+    connections: {
+      whoop: getConnectionStatus('whoop') || { service: 'whoop', status: getToken('whoop') ? 'connected' : 'disconnected' },
+      strava: getConnectionStatus('strava') || { service: 'strava', status: getToken('strava') ? 'connected' : 'disconnected' },
+    },
   });
 });
 
@@ -849,6 +935,15 @@ app.get('/dashboard', (req, res) => {
   .loading{text-align:center;padding:60px 20px;color:#666}
   .spinner{display:inline-block;width:30px;height:30px;border:3px solid #1f1f1f;border-top-color:#4ade80;border-radius:50%;animation:spin 0.8s linear infinite}
   @keyframes spin{to{transform:rotate(360deg)}}
+
+  .reconnect-banner{background:linear-gradient(135deg,#3a1f0d 0%,#1a0f08 100%);border:1px solid #5a3a1f;border-radius:14px;padding:14px 16px;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;gap:12px}
+  .reconnect-banner.error{background:linear-gradient(135deg,#3a1212 0%,#1a0808 100%);border-color:#5a2828}
+  .reconnect-text{flex:1;font-size:0.85rem;color:#f5d491;line-height:1.4}
+  .reconnect-text.error{color:#f5a191}
+  .reconnect-text strong{display:block;font-size:0.95rem;margin-bottom:2px;color:#fff}
+  .reconnect-btn{background:#facc15;color:#000;border:none;padding:9px 16px;border-radius:8px;font-size:0.85rem;font-weight:600;text-decoration:none;white-space:nowrap;cursor:pointer;font-family:inherit}
+  .reconnect-btn:active{transform:scale(0.97)}
+  .reconnect-btn.error{background:#f87171}
 </style>
 </head>
 <body>
@@ -865,6 +960,8 @@ app.get('/dashboard', (req, res) => {
     <div class="spinner"></div>
     <div style="margin-top:14px">Loading…</div>
   </div>
+
+  <div id="connectionBanners"></div>
 
   <!-- TODAY VIEW -->
   <div class="view" id="todayView">
@@ -926,6 +1023,8 @@ async function runRefresh(){
     if(!data.success) throw new Error(data.error);
     await loadData();
   }catch(e){
+    // Reload data anyway so the disconnect banner appears
+    await loadData();
     alert('Run failed: '+e.message);
   }
   btn.disabled = false;
@@ -942,10 +1041,36 @@ function switchView(name){
 function renderAll(){
   if(!appData) return;
   document.getElementById('dateDisplay').textContent = new Date().toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric'});
+  renderBanners();
   renderToday();
   renderTrends();
   renderHistory();
   document.getElementById('todayView').classList.add('active');
+}
+
+function renderBanners(){
+  const el = document.getElementById('connectionBanners');
+  const banners = [];
+  const c = appData.connections || {};
+  if(c.whoop?.status === 'disconnected'){
+    banners.push(\`<div class="reconnect-banner error">
+      <div class="reconnect-text error">
+        <strong>⚠ WHOOP disconnected</strong>
+        \${c.whoop.error_message || 'Tap to reconnect your WHOOP account.'}
+      </div>
+      <a href="/auth/whoop" class="reconnect-btn error">Reconnect</a>
+    </div>\`);
+  }
+  if(c.strava?.status === 'disconnected'){
+    banners.push(\`<div class="reconnect-banner error">
+      <div class="reconnect-text error">
+        <strong>⚠ Strava disconnected</strong>
+        \${c.strava.error_message || 'Tap to reconnect your Strava account.'}
+      </div>
+      <a href="/auth/strava" class="reconnect-btn error">Reconnect</a>
+    </div>\`);
+  }
+  el.innerHTML = banners.join('');
 }
 
 function renderToday(){
@@ -969,6 +1094,28 @@ function renderToday(){
       <div class="recovery-pct \${recCol}">\${snap.recovery_pct ?? '—'}<span style="font-size:1.5rem">%</span></div>
       <div class="recovery-headline">\${p?.headline || ''}</div>
     </div>
+
+    \${appData.weather ? \`
+    <div class="card" style="margin-bottom:14px;padding:12px 16px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div>
+          <div style="font-size:0.7rem;color:#666;text-transform:uppercase;letter-spacing:0.08em">Durango Weather</div>
+          <div style="font-size:0.95rem;color:#ddd;margin-top:2px">\${appData.weather.current.temp}°F · \${appData.weather.current.description}</div>
+        </div>
+        <div style="text-align:right">
+          <div style="font-size:0.75rem;color:#888">Wind \${appData.weather.current.wind_mph}mph</div>
+          <div style="font-size:0.75rem;color:#888">Feels \${appData.weather.current.feels_like}°</div>
+        </div>
+      </div>
+      \${appData.weather.next_12h?.length ? \`
+      <div style="display:flex;gap:8px;margin-top:10px;padding-top:10px;border-top:0.5px solid #1f1f1f">
+        \${appData.weather.next_12h.map(f => \`<div style="flex:1;text-align:center;font-size:0.7rem">
+          <div style="color:#666">\${f.time}</div>
+          <div style="color:#ddd;margin-top:2px;font-weight:500">\${f.temp}°</div>
+          \${f.precip_chance_pct > 20 ? \`<div style="color:#60a5fa;font-size:0.65rem">\${f.precip_chance_pct}%💧</div>\` : ''}
+        </div>\`).join('')}
+      </div>\` : ''}
+    </div>\` : ''}
 
     <div class="stat-grid">
       <div class="stat-tile">
